@@ -30,12 +30,16 @@ class ModelDownloader:
                 urllib.request.urlretrieve(url, name)
 
 
-# --- SETTINGS & STATE ---
+# --- SETTINGS & INITIALIZATION ---
 ModelDownloader.ensure_models()
 pyautogui.FAILSAFE = False
+pyautogui.PAUSE = 0
 WINDOW_NAME = 'DeParted'
 
-# Settings as requested
+# Added these back to fix the NameError
+SCREEN_W, SCREEN_H = pyautogui.size()
+
+# Settings Dictionary
 config = {
     "show_camera": False,
     "show_face": True,
@@ -48,15 +52,12 @@ config = {
     "debug_mode": False
 }
 
-# 2026-02-08 Persistent Settings placeholder
-persistent = {"Volume": 50, "Repeat": False, "Auto Sleep": False, "Overlay": True}
-
 hand_zero_pt = np.array([0.5, 0.5])
 latest_hand, latest_face, latest_objs, latest_pose = None, None, None, None
 smoothed_hands = {}
 prev_time = time.time()
 
-# --- MAPPINGS ---
+# --- LANDMARK MAPPINGS ---
 FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176,
              149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
 HAND_CONN = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (9, 10), (10, 11), (11, 12), (13, 14),
@@ -70,11 +71,13 @@ def handle_click(event, x, y, flags, param):
     global hand_zero_pt
     if event == cv2.EVENT_LBUTTONDOWN and 0 <= y <= 40:
         idx = x // 80
-        keys = list(config.keys())
+        keys = list(config.keys())  # ["show_camera", "show_face", ...]
         if idx < len(keys):
             config[keys[idx]] = not config[keys[idx]]
         elif idx == 9 and latest_hand and len(latest_hand.hand_landmarks) > 0:
+            # Calibration button
             hand_zero_pt = np.array([latest_hand.hand_landmarks[0][8].x, latest_hand.hand_landmarks[0][8].y])
+            print("[DeParted] Mouse Calibrated.")
 
 
 def h_cb(res, img, ts): global latest_hand; latest_hand = res
@@ -90,14 +93,17 @@ def p_cb(res, img, ts): global latest_pose; latest_pose = res
 
 
 # --- RUNTIME ---
-SEL = 0  # Adjust index if needed
-cap = cv2.VideoCapture(SEL)
-if platform.system() != "Windows": cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+cap = cv2.VideoCapture(0)  # Change index if video0 is not your camera
+if platform.system() != "Windows":
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 cv2.setMouseCallback(WINDOW_NAME, handle_click)
+
+# Virtual Camera setup (Device 10 for Arch)
+vcam_device = "/dev/video10" if platform.system() != "Windows" else None
 
 with vision.HandLandmarker.create_from_options(
         vision.HandLandmarkerOptions(base_options=python.BaseOptions(model_asset_path='hand_landmarker.task'),
@@ -113,13 +119,11 @@ with vision.HandLandmarker.create_from_options(
         vision.PoseLandmarker.create_from_options(
             vision.PoseLandmarkerOptions(base_options=python.BaseOptions(model_asset_path='pose_landmarker.task'),
                                          running_mode=vision.RunningMode.LIVE_STREAM, result_callback=p_cb)) as pose_tk, \
-        pyvirtualcam.Camera(width=1280, height=720, fps=30,
-                            device="/dev/video10" if platform.system() != "Windows" else None) as vcam:
+        pyvirtualcam.Camera(width=1280, height=720, fps=30, device=vcam_device) as vcam:
     while cap.isOpened():
         success, frame = cap.read()
         if not success: break
 
-        # Performance Tracking
         curr_time = time.time()
         fps = 1 / (curr_time - prev_time)
         prev_time = curr_time
@@ -136,13 +140,14 @@ with vision.HandLandmarker.create_from_options(
 
         display_frame = frame.copy() if config["show_camera"] else np.zeros((h, w, 3), dtype=np.uint8)
 
-        # Rendering Skeletons (Always on)
+        # 1. Pose
         if config["show_body"] and latest_pose and latest_pose.pose_landmarks:
             p_pts = np.array([[int(lm.x * w), int(lm.y * h)] for lm in latest_pose.pose_landmarks[0]])
             for s, e in POSE_CONN: cv2.line(display_frame, tuple(p_pts[s]), tuple(p_pts[e]), (0, 0, 255), 2)
             if config["show_joints"]:
                 for pt in p_pts: cv2.circle(display_frame, tuple(pt), 3, (255, 255, 255), -1)
 
+        # 2. Face
         if config["show_face"] and latest_face and latest_face.face_landmarks:
             f_pts = np.array([[int(lm.x * w), int(lm.y * h)] for lm in latest_face.face_landmarks[0]])
             cv2.polylines(display_frame, [np.array([f_pts[i] for i in FACE_OVAL], np.int32)], True, (0, 255, 0), 1)
@@ -150,6 +155,7 @@ with vision.HandLandmarker.create_from_options(
                 for lm in latest_face.face_landmarks[0]: cv2.circle(display_frame, (int(lm.x * w), int(lm.y * h)), 1,
                                                                     (200, 255, 200), -1)
 
+        # 3. Hands
         if config["show_hand"] and latest_hand:
             for idx, hand_lms in enumerate(latest_hand.hand_landmarks):
                 h_raw = np.array([[lm.x, lm.y] for lm in hand_lms])
@@ -161,24 +167,29 @@ with vision.HandLandmarker.create_from_options(
                 for s, e in HAND_CONN: cv2.line(display_frame, tuple(h_pts[s]), tuple(h_pts[e]), (255, 255, 255), 1)
                 if config["show_joints"]:
                     for pt in h_pts: cv2.circle(display_frame, tuple(pt), 3, (0, 255, 255), -1)
+
                 if config["mouse_active"] and idx == 0:
                     off = (smoothed_hands[0][8] - hand_zero_pt) * 2.5
-                    pyautogui.moveTo(np.clip(SCREEN_W / 2 + (off[0] * SCREEN_W), 0, SCREEN_W),
-                                     np.clip(SCREEN_H / 2 + (off[1] * SCREEN_H), 0, SCREEN_H), _pause=False)
+                    pyautogui.moveTo(
+                        np.clip(SCREEN_W / 2 + (off[0] * SCREEN_W), 0, SCREEN_W),
+                        np.clip(SCREEN_H / 2 + (off[1] * SCREEN_H), 0, SCREEN_H),
+                        _pause=False
+                    )
 
+        # 4. Objects
         if config["show_objs"] and latest_objs:
             for d in latest_objs.detections:
                 b = d.bounding_box
                 cv2.rectangle(display_frame, (int(b.origin_x), int(b.origin_y)),
                               (int(b.origin_x + b.width), int(b.origin_y + b.height)), (255, 0, 0), 2)
 
-        # Debug Stats
+        # DEBUG MODE HUD
         if config["debug_mode"]:
             stats = [f"FPS: {int(fps)}", f"CPU: {psutil.cpu_percent()}%", f"RAM: {psutil.virtual_memory().percent}%"]
             for i, text in enumerate(stats):
                 cv2.putText(display_frame, text, (10, h - 20 - (i * 30)), 0, 0.7, (0, 255, 255), 2)
 
-        # Settings Menu Bar
+        # SETTINGS BAR
         labels = ["CAM", "FACE", "HAND", "BODY", "OBJ", "JOINT", "MSE", "VCAM", "DEBUG", "CALIB"]
         for i, label in enumerate(labels):
             key = list(config.keys())[i] if i < 9 else None
@@ -186,7 +197,7 @@ with vision.HandLandmarker.create_from_options(
             cv2.rectangle(display_frame, (i * 80, 0), (i * 80 + 75, 40), (0, 150, 0) if state else (0, 0, 150), -1)
             cv2.putText(display_frame, label, (i * 80 + 5, 25), 0, 0.35, (255, 255, 255), 1)
 
-        # Virtual Cam Output
+        # V-CAM STREAM
         if config["v_cam"]:
             vcam.send(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
             vcam.sleep_until_next_frame()
