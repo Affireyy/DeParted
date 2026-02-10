@@ -16,8 +16,8 @@ pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
 SCREEN_W, SCREEN_H = pyautogui.size()
 WINDOW_MAIN = 'DeParted'
+TARGET_W, TARGET_H = 1280, 720
 
-# Settings Dictionary (Calibrate removed)
 config = {
     "show_camera": False,
     "show_face": True,
@@ -67,10 +67,15 @@ def p_cb(res, img, ts): global latest_pose; latest_pose = res
 
 # --- RUNTIME ---
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, TARGET_W)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, TARGET_H)
 
+# Force Window Size
 cv2.namedWindow(WINDOW_MAIN, cv2.WINDOW_NORMAL)
+cv2.resizeWindow(WINDOW_MAIN, TARGET_W, TARGET_H)
+# Ensure the window stays at 1280x720 regardless of mouse dragging (optional)
+# cv2.setWindowProperty(WINDOW_MAIN, cv2.WND_PROP_AUTOSIZE, cv2.WINDOW_NORMAL)
+
 cv2.setMouseCallback(WINDOW_MAIN, handle_click)
 
 vcam_device = "/dev/video10" if platform.system() != "Windows" else None
@@ -89,10 +94,13 @@ with vision.HandLandmarker.create_from_options(
         vision.PoseLandmarker.create_from_options(
             vision.PoseLandmarkerOptions(base_options=python.BaseOptions(model_asset_path='pose_landmarker.task'),
                                          running_mode=vision.RunningMode.LIVE_STREAM, result_callback=p_cb)) as pose_tk, \
-        pyvirtualcam.Camera(width=1280, height=720, fps=30, device=vcam_device) as vcam:
+        pyvirtualcam.Camera(width=TARGET_W, height=TARGET_H, fps=30, device=vcam_device) as vcam:
     while cap.isOpened():
-        success, frame = cap.read()
+        success, raw_frame = cap.read()
         if not success: break
+
+        # Resize frame to match 1280x720 virtual cam and window expectation
+        frame = cv2.resize(raw_frame, (TARGET_W, TARGET_H), interpolation=cv2.INTER_LINEAR)
 
         curr_time = time.time();
         fps_val = 1 / (curr_time - prev_time);
@@ -104,17 +112,15 @@ with vision.HandLandmarker.create_from_options(
 
         for tk in [hand_tk, face_tk, obj_tk, pose_tk]: tk.detect_async(mp_img, ts)
 
-        # 1. GENERATE TRACKING DATA (for both Local and VCam)
+        # Build Feed
         output_frame = frame.copy() if config["show_camera"] else np.zeros((h, w, 3), dtype=np.uint8)
 
-        # Pose
         if config["show_body"] and latest_pose and latest_pose.pose_landmarks:
             p_pts = np.array([[int(lm.x * w), int(lm.y * h)] for lm in latest_pose.pose_landmarks[0]])
             for s, e in POSE_CONN: cv2.line(output_frame, tuple(p_pts[s]), tuple(p_pts[e]), (0, 0, 255), 2)
             if config["show_joints"]:
                 for pt in p_pts: cv2.circle(output_frame, tuple(pt), 3, (255, 255, 255), -1)
 
-        # Face (With restored Joints)
         if config["show_face"] and latest_face and latest_face.face_landmarks:
             f_pts = np.array([[int(lm.x * w), int(lm.y * h)] for lm in latest_face.face_landmarks[0]])
             cv2.polylines(output_frame, [np.array([f_pts[i] for i in FACE_OVAL], np.int32)], True, (0, 255, 0), 1)
@@ -122,7 +128,6 @@ with vision.HandLandmarker.create_from_options(
                 for lm in latest_face.face_landmarks[0]: cv2.circle(output_frame, (int(lm.x * w), int(lm.y * h)), 1,
                                                                     (200, 255, 200), -1)
 
-        # Hands
         if config["show_hand"] and latest_hand:
             for idx, hand_lms in enumerate(latest_hand.hand_landmarks):
                 h_raw = np.array([[lm.x, lm.y] for lm in hand_lms])
@@ -145,22 +150,19 @@ with vision.HandLandmarker.create_from_options(
                 cv2.rectangle(output_frame, (int(b.origin_x), int(b.origin_y)),
                               (int(b.origin_x + b.width), int(b.origin_y + b.height)), (255, 0, 0), 2)
 
-        # 2. VIRTUAL CAMERA SEND (Clean feed)
+        # Virtual Camera Send
         if config["v_cam"]:
             vcam.send(cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB))
             vcam.sleep_until_next_frame()
 
-        # 3. ADD LOCAL UI OVERLAY (Main window only)
+        # UI Overlay
         display_frame = output_frame.copy()
-
-        # Debug Stats
         if config["debug_mode"]:
             stats = [f"FPS: {int(fps_val)}", f"CPU: {psutil.cpu_percent()}%",
                      f"RAM: {psutil.virtual_memory().percent}%"]
             for i, txt in enumerate(stats): cv2.putText(display_frame, txt, (10, h - 20 - (i * 25)), 0, 0.6,
                                                         (0, 255, 255), 2)
 
-        # Settings Menu Overlay
         labels = ["CAM", "FACE", "HAND", "BODY", "OBJ", "JOINT", "MSE", "VCAM", "DEBUG"]
         for i, label in enumerate(labels):
             key = list(config.keys())[i]
