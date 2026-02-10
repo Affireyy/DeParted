@@ -15,9 +15,9 @@ from mediapipe.tasks.python import vision
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
 SCREEN_W, SCREEN_H = pyautogui.size()
-WINDOW_MAIN = 'DeParted - Stream Output'
-WINDOW_SET = 'DeParted - Settings'
+WINDOW_MAIN = 'DeParted'
 
+# Settings Dictionary (Calibrate removed)
 config = {
     "show_camera": False,
     "show_face": True,
@@ -45,15 +45,12 @@ POSE_CONN = [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (11, 23), (12, 24
 
 
 # --- CALLBACKS ---
-def handle_settings_click(event, x, y, flags, param):
-    global hand_zero_pt
-    if event == cv2.EVENT_LBUTTONDOWN:
-        idx = y // 50  # Vertical menu
+def handle_click(event, x, y, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN and 0 <= y <= 40:
+        idx = x // 80
         keys = list(config.keys())
         if idx < len(keys):
             config[keys[idx]] = not config[keys[idx]]
-        elif idx == len(keys) and latest_hand and len(latest_hand.hand_landmarks) > 0:
-            hand_zero_pt = np.array([latest_hand.hand_landmarks[0][8].x, latest_hand.hand_landmarks[0][8].y])
 
 
 def h_cb(res, img, ts): global latest_hand; latest_hand = res
@@ -74,9 +71,7 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
 cv2.namedWindow(WINDOW_MAIN, cv2.WINDOW_NORMAL)
-cv2.namedWindow(WINDOW_SET, cv2.WINDOW_NORMAL)
-cv2.resizeWindow(WINDOW_SET, 250, 550)
-cv2.setMouseCallback(WINDOW_SET, handle_settings_click)
+cv2.setMouseCallback(WINDOW_MAIN, handle_click)
 
 vcam_device = "/dev/video10" if platform.system() != "Windows" else None
 
@@ -100,7 +95,7 @@ with vision.HandLandmarker.create_from_options(
         if not success: break
 
         curr_time = time.time();
-        fps = 1 / (curr_time - prev_time);
+        fps_val = 1 / (curr_time - prev_time);
         prev_time = curr_time
         frame = cv2.flip(frame, 1);
         h, w = frame.shape[:2];
@@ -109,19 +104,25 @@ with vision.HandLandmarker.create_from_options(
 
         for tk in [hand_tk, face_tk, obj_tk, pose_tk]: tk.detect_async(mp_img, ts)
 
-        # BUILD CLEAN STREAM FRAME
-        stream_frame = frame.copy() if config["show_camera"] else np.zeros((h, w, 3), dtype=np.uint8)
+        # 1. GENERATE TRACKING DATA (for both Local and VCam)
+        output_frame = frame.copy() if config["show_camera"] else np.zeros((h, w, 3), dtype=np.uint8)
 
+        # Pose
         if config["show_body"] and latest_pose and latest_pose.pose_landmarks:
             p_pts = np.array([[int(lm.x * w), int(lm.y * h)] for lm in latest_pose.pose_landmarks[0]])
-            for s, e in POSE_CONN: cv2.line(stream_frame, tuple(p_pts[s]), tuple(p_pts[e]), (0, 0, 255), 2)
+            for s, e in POSE_CONN: cv2.line(output_frame, tuple(p_pts[s]), tuple(p_pts[e]), (0, 0, 255), 2)
             if config["show_joints"]:
-                for pt in p_pts: cv2.circle(stream_frame, tuple(pt), 3, (255, 255, 255), -1)
+                for pt in p_pts: cv2.circle(output_frame, tuple(pt), 3, (255, 255, 255), -1)
 
+        # Face (With restored Joints)
         if config["show_face"] and latest_face and latest_face.face_landmarks:
             f_pts = np.array([[int(lm.x * w), int(lm.y * h)] for lm in latest_face.face_landmarks[0]])
-            cv2.polylines(stream_frame, [np.array([f_pts[i] for i in FACE_OVAL], np.int32)], True, (0, 255, 0), 1)
+            cv2.polylines(output_frame, [np.array([f_pts[i] for i in FACE_OVAL], np.int32)], True, (0, 255, 0), 1)
+            if config["show_joints"]:
+                for lm in latest_face.face_landmarks[0]: cv2.circle(output_frame, (int(lm.x * w), int(lm.y * h)), 1,
+                                                                    (200, 255, 200), -1)
 
+        # Hands
         if config["show_hand"] and latest_hand:
             for idx, hand_lms in enumerate(latest_hand.hand_landmarks):
                 h_raw = np.array([[lm.x, lm.y] for lm in hand_lms])
@@ -130,38 +131,44 @@ with vision.HandLandmarker.create_from_options(
                 else:
                     smoothed_hands[idx] = (smoothed_hands[idx] * 0.7) + (h_raw * 0.3)
                 h_pts = (smoothed_hands[idx] * [w, h]).astype(int)
-                for s, e in HAND_CONN: cv2.line(stream_frame, tuple(h_pts[s]), tuple(h_pts[e]), (255, 255, 255), 1)
+                for s, e in HAND_CONN: cv2.line(output_frame, tuple(h_pts[s]), tuple(h_pts[e]), (255, 255, 255), 1)
                 if config["show_joints"]:
-                    for pt in h_pts: cv2.circle(stream_frame, tuple(pt), 3, (0, 255, 255), -1)
+                    for pt in h_pts: cv2.circle(output_frame, tuple(pt), 3, (0, 255, 255), -1)
                 if config["mouse_active"] and idx == 0:
                     off = (smoothed_hands[0][8] - hand_zero_pt) * 2.5
                     pyautogui.moveTo(np.clip(SCREEN_W / 2 + (off[0] * SCREEN_W), 0, SCREEN_W),
                                      np.clip(SCREEN_H / 2 + (off[1] * SCREEN_H), 0, SCREEN_H), _pause=False)
 
-        if config["debug_mode"]:
-            stats = [f"FPS: {int(fps)}", f"CPU: {psutil.cpu_percent()}%", f"RAM: {psutil.virtual_memory().percent}%"]
-            for i, txt in enumerate(stats): cv2.putText(stream_frame, txt, (10, h - 20 - (i * 25)), 0, 0.6,
-                                                        (0, 255, 255), 2)
+        if config["show_objs"] and latest_objs:
+            for d in latest_objs.detections:
+                b = d.bounding_box
+                cv2.rectangle(output_frame, (int(b.origin_x), int(b.origin_y)),
+                              (int(b.origin_x + b.width), int(b.origin_y + b.height)), (255, 0, 0), 2)
 
-        # BUILD SETTINGS WINDOW
-        settings_panel = np.zeros((550, 250, 3), dtype=np.uint8)
-        for i, (key, val) in enumerate(config.items()):
-            color = (0, 200, 0) if val else (0, 0, 200)
-            cv2.rectangle(settings_panel, (10, i * 50 + 5), (240, i * 50 + 45), color, -1)
-            cv2.putText(settings_panel, f"{key.replace('show_', '').upper()}: {val}", (20, i * 50 + 30), 0, 0.5,
-                        (255, 255, 255), 1)
-
-        # BLUE CALIBRATION BUTTON (#0000FF is BGR 255,0,0)
-        cv2.rectangle(settings_panel, (10, 455), (240, 495), (255, 0, 0), -1)
-        cv2.putText(settings_panel, "CALIBRATE MOUSE", (45, 480), 0, 0.5, (255, 255, 255), 1)
-
-        # OUTPUT
+        # 2. VIRTUAL CAMERA SEND (Clean feed)
         if config["v_cam"]:
-            vcam.send(cv2.cvtColor(stream_frame, cv2.COLOR_BGR2RGB))
+            vcam.send(cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB))
             vcam.sleep_until_next_frame()
 
-        cv2.imshow(WINDOW_MAIN, stream_frame)
-        cv2.imshow(WINDOW_SET, settings_panel)
+        # 3. ADD LOCAL UI OVERLAY (Main window only)
+        display_frame = output_frame.copy()
+
+        # Debug Stats
+        if config["debug_mode"]:
+            stats = [f"FPS: {int(fps_val)}", f"CPU: {psutil.cpu_percent()}%",
+                     f"RAM: {psutil.virtual_memory().percent}%"]
+            for i, txt in enumerate(stats): cv2.putText(display_frame, txt, (10, h - 20 - (i * 25)), 0, 0.6,
+                                                        (0, 255, 255), 2)
+
+        # Settings Menu Overlay
+        labels = ["CAM", "FACE", "HAND", "BODY", "OBJ", "JOINT", "MSE", "VCAM", "DEBUG"]
+        for i, label in enumerate(labels):
+            key = list(config.keys())[i]
+            col = (0, 150, 0) if config[key] else (0, 0, 150)
+            cv2.rectangle(display_frame, (i * 80, 0), (i * 80 + 75, 40), col, -1)
+            cv2.putText(display_frame, label, (i * 80 + 5, 25), 0, 0.35, (255, 255, 255), 1)
+
+        cv2.imshow(WINDOW_MAIN, display_frame)
         if cv2.waitKey(1) & 0xFF == 27: break
 
 cap.release()
